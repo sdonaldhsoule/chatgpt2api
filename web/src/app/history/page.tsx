@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { ImageLightbox } from "@/components/image-lightbox";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   fetchImageHistory,
   fetchImageHistoryImage,
@@ -46,6 +47,7 @@ export default function HistoryPage() {
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [loadingRecordId, setLoadingRecordId] = useState<string | null>(null);
+  const [promptRecord, setPromptRecord] = useState<ApiImageHistoryRecord | null>(null);
   const [page, setPage] = useState(1);
 
   const totalPages = Math.max(1, Math.ceil(records.length / PAGE_SIZE));
@@ -263,6 +265,13 @@ export default function HistoryPage() {
                         <p className="line-clamp-3 text-sm leading-6 text-stone-700">
                           {record.prompt || "无提示词"}
                         </p>
+                        <button
+                          type="button"
+                          className="text-xs font-medium text-stone-500 transition hover:text-stone-900"
+                          onClick={() => setPromptRecord(record)}
+                        >
+                          查看完整提示词
+                        </button>
                       </div>
                       <div className="flex items-center justify-between rounded-2xl bg-stone-50 px-4 py-3 text-xs text-stone-600">
                         <div className="flex items-center gap-2">
@@ -337,6 +346,22 @@ export default function HistoryPage() {
         onOpenChange={setLightboxOpen}
         onIndexChange={setLightboxIndex}
       />
+
+      <Dialog open={!!promptRecord} onOpenChange={(open) => !open && setPromptRecord(null)}>
+        <DialogContent className="w-[min(92vw,720px)]">
+          <DialogHeader>
+            <DialogTitle>完整提示词</DialogTitle>
+            <DialogDescription>
+              {promptRecord
+                ? `${promptRecord.mode === "edit" ? "编辑" : "生成"} · ${promptRecord.source_endpoint} · ${formatDateTime(promptRecord.created_at)}`
+                : ""}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="max-h-[60vh] overflow-y-auto rounded-3xl bg-stone-50 px-5 py-4 text-sm leading-7 whitespace-pre-wrap break-words text-stone-700">
+            {promptRecord?.prompt || "无提示词"}
+          </div>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }
