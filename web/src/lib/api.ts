@@ -73,6 +73,21 @@ type ApiImageHistoryResponse = {
   items: ApiImageHistoryRecord[];
 };
 
+export type ApiImageHistoryDeleteItem = {
+  record_id: string;
+  image_ids: string[];
+};
+
+export type ApiImageHistoryDeleteRequest = {
+  items: ApiImageHistoryDeleteItem[];
+};
+
+export type ApiImageHistoryDeleteResponse = {
+  deleted_images: number;
+  deleted_records: number;
+  items: ApiImageHistoryRecord[];
+};
+
 export async function login(authKey: string) {
   const normalizedAuthKey = String(authKey || "").trim();
   return httpRequest<{ ok: boolean }>("/auth/login", {
@@ -133,6 +148,13 @@ export async function fetchImageHistory() {
 
 export async function fetchImageHistoryImage(recordId: string, imageId: string) {
   return blobRequest(`/api/image-history/${recordId}/images/${imageId}`);
+}
+
+export async function deleteImageHistoryImages(items: ApiImageHistoryDeleteItem[]) {
+  return httpRequest<ApiImageHistoryDeleteResponse>("/api/image-history/delete", {
+    method: "POST",
+    body: { items } satisfies ApiImageHistoryDeleteRequest,
+  });
 }
 
 export async function generateImage(prompt: string, model: ImageModel = "gpt-image-1") {
