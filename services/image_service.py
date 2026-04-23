@@ -55,6 +55,13 @@ class ImageGenerationError(Exception):
     pass
 
 
+def _normalize_image_generation_error(exc: Exception, fallback_message: str) -> ImageGenerationError:
+    if isinstance(exc, ImageGenerationError):
+        return exc
+    message = str(exc or "").strip() or fallback_message
+    return ImageGenerationError(message)
+
+
 @dataclass
 class GeneratedImage:
     b64_json: str
@@ -722,7 +729,7 @@ def generate_image_result(access_token: str, prompt: str, model: str = DEFAULT_M
         }
     except Exception as exc:
         print(f"[image-upstream] fail token={access_token[:12]}... error={exc}")
-        raise
+        raise _normalize_image_generation_error(exc, "image generation failed") from exc
     finally:
         session.close()
 
@@ -860,6 +867,6 @@ def edit_image_result(
         }
     except Exception as exc:
         print(f"[image-edit-upstream] fail token={access_token[:12]}... error={exc}")
-        raise
+        raise _normalize_image_generation_error(exc, "image edit failed") from exc
     finally:
         session.close()
