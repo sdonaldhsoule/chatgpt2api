@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import base64
+import binascii
 from contextlib import asynccontextmanager
+from json import JSONDecodeError
 from pathlib import Path
 from threading import Event, Thread
-from fastapi import APIRouter, FastAPI, File, Form, Header, Request, HTTPException, UploadFile
+from fastapi import APIRouter, FastAPI, Header, Request, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.datastructures import FormData, UploadFile
 
 from services.account_service import account_service
 from services.chatgpt_service import ChatGPTService
@@ -24,6 +28,7 @@ from services.sub2api_service import (
 )
 
 from services.image_service import ImageGenerationError
+from services.utils import parse_image_count
 from services.version import get_app_version
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -191,6 +196,118 @@ def require_auth_key(authorization: str | None) -> None:
 def resolve_image_base_url(request: Request) -> str:
     configured_base_url = str(getattr(config, "base_url", "") or "").strip().rstrip("/")
     return configured_base_url or f"{request.url.scheme}://{request.headers.get('host', request.url.netloc)}"
+
+
+def bad_request(message: str) -> HTTPException:
+    return HTTPException(status_code=400, detail={"error": message})
+
+
+def _image_suffix_for_mime_type(mime_type: str) -> str:
+    normalized_mime_type = str(mime_type or "").strip().lower()
+    if normalized_mime_type == "image/jpeg":
+        return ".jpg"
+    if normalized_mime_type == "image/webp":
+        return ".webp"
+    if normalized_mime_type == "image/gif":
+        return ".gif"
+    return ".png"
+
+
+def _decode_json_edit_image(image_url: object, index: int) -> tuple[bytes, str, str]:
+    field_name = f"images[{index}].image_url"
+    normalized_image_url = str(image_url or "").strip()
+    if not normalized_image_url:
+        raise bad_request(f"{field_name} is required")
+    if not normalized_image_url.startswith("data:"):
+        raise bad_request(f"{field_name} must be a data URL")
+
+    header, separator, encoded_data = normalized_image_url.partition(",")
+    if not separator:
+        raise bad_request(f"{field_name} must be a valid data URL")
+    if ";base64" not in header.lower():
+        raise bad_request(f"{field_name} must be base64 encoded")
+
+    mime_type = header.removeprefix("data:").split(";", 1)[0].strip().lower()
+    if not mime_type.startswith("image/"):
+        raise bad_request(f"{field_name} must be an image data URL")
+
+    try:
+        image_data = base64.b64decode(encoded_data, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise bad_request(f"{field_name} base64 decode failed") from exc
+
+    if not image_data:
+        raise bad_request(f"{field_name} decoded image is empty")
+
+    file_name = f"image-{index + 1}{_image_suffix_for_mime_type(mime_type)}"
+    return image_data, file_name, mime_type
+
+
+def _normalize_json_edit_images(raw_images: object) -> list[tuple[bytes, str, str]]:
+    if raw_images is None:
+        raise bad_request("images is required")
+    if not isinstance(raw_images, list) or not raw_images:
+        raise bad_request("images must be a non-empty array")
+
+    images: list[tuple[bytes, str, str]] = []
+    for index, item in enumerate(raw_images):
+        if not isinstance(item, dict):
+            raise bad_request(f"images[{index}] must be an object")
+        images.append(_decode_json_edit_image(item.get("image_url"), index))
+    return images
+
+
+async def _normalize_multipart_edit_images(form: FormData) -> list[tuple[bytes, str, str]]:
+    uploads = [
+        *[item for item in form.getlist("image") if isinstance(item, UploadFile)],
+        *[item for item in form.getlist("image[]") if isinstance(item, UploadFile)],
+    ]
+    if not uploads:
+        raise bad_request("image file is required")
+
+    images: list[tuple[bytes, str, str]] = []
+    for upload in uploads:
+        image_data = await upload.read()
+        if not image_data:
+            raise bad_request("image file is empty")
+
+        file_name = upload.filename or "image.png"
+        mime_type = upload.content_type or "image/png"
+        images.append((image_data, file_name, mime_type))
+    return images
+
+
+async def _parse_image_edit_request(request: Request) -> tuple[str, str, int, str, list[tuple[bytes, str, str]]]:
+    content_type = str(request.headers.get("content-type") or "").lower()
+    if content_type.startswith("application/json"):
+        try:
+            body = await request.json()
+        except (JSONDecodeError, UnicodeDecodeError) as exc:
+            raise bad_request("request body must be valid JSON") from exc
+
+        if not isinstance(body, dict):
+            raise bad_request("request body must be a JSON object")
+
+        prompt = str(body.get("prompt") or "").strip()
+        if not prompt:
+            raise bad_request("prompt is required")
+
+        model = str(body.get("model") or "gpt-image-1").strip() or "gpt-image-1"
+        n = parse_image_count(body.get("n"))
+        response_format = str(body.get("response_format") or "b64_json").strip() or "b64_json"
+        images = _normalize_json_edit_images(body.get("images"))
+        return prompt, model, n, response_format, images
+
+    form = await request.form()
+    prompt = str(form.get("prompt") or "").strip()
+    if not prompt:
+        raise bad_request("prompt is required")
+
+    model = str(form.get("model") or "gpt-image-1").strip() or "gpt-image-1"
+    n = parse_image_count(form.get("n"))
+    response_format = str(form.get("response_format") or "b64_json").strip() or "b64_json"
+    images = await _normalize_multipart_edit_images(form)
+    return prompt, model, n, response_format, images
 
 
 def start_limited_account_watcher(stop_event: Event) -> Thread:
@@ -386,32 +503,11 @@ def create_app() -> FastAPI:
     async def edit_images(
             request: Request,
             authorization: str | None = Header(default=None),
-            image: list[UploadFile] | None = File(default=None),
-            image_list: list[UploadFile] | None = File(default=None, alias="image[]"),
-            prompt: str = Form(...),
-            model: str = Form(default="gpt-image-1"),
-            n: int = Form(default=1),
-            response_format: str = Form(default="b64_json"),
     ):
         require_auth_key(authorization)
-        if n < 1 or n > 4:
-            raise HTTPException(status_code=400, detail={"error": "n must be between 1 and 4"})
-
-        uploads = [*(image or []), *(image_list or [])]
-        if not uploads:
-            raise HTTPException(status_code=400, detail={"error": "image file is required"})
-
+        # JSON 和 multipart 最终都归一成同一图片元组结构，复用现有编辑主流程。
+        prompt, model, n, response_format, images = await _parse_image_edit_request(request)
         base_url = resolve_image_base_url(request)
-
-        images: list[tuple[bytes, str, str]] = []
-        for upload in uploads:
-            image_data = await upload.read()
-            if not image_data:
-                raise HTTPException(status_code=400, detail={"error": "image file is empty"})
-
-            file_name = upload.filename or "image.png"
-            mime_type = upload.content_type or "image/png"
-            images.append((image_data, file_name, mime_type))
 
         try:
             return await run_in_threadpool(

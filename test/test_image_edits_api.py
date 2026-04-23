@@ -105,6 +105,92 @@ class ImageEditsApiTests(unittest.TestCase):
             ["first.png", "second.png"],
         )
 
+    def test_accepts_json_data_url_image(self) -> None:
+        response = self.client.post(
+            "/v1/images/edits",
+            headers=self.auth_header,
+            json={
+                "prompt": "把这张图改成复古海报",
+                "model": "gpt-image-1",
+                "n": 1,
+                "response_format": "b64_json",
+                "images": [
+                    {
+                        "image_url": "data:image/png;base64,ZmFrZQ==",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNotNone(_FakeChatGPTService.last_call)
+        self.assertEqual(_FakeChatGPTService.last_call["prompt"], "把这张图改成复古海报")
+        self.assertEqual(
+            _FakeChatGPTService.last_call["images"],
+            [(b"fake", "image-1.png", "image/png")],
+        )
+
+    def test_rejects_json_without_images(self) -> None:
+        response = self.client.post(
+            "/v1/images/edits",
+            headers=self.auth_header,
+            json={
+                "prompt": "把这张图改成复古海报",
+                "model": "gpt-image-1",
+                "n": 1,
+                "response_format": "b64_json",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json(), {"detail": {"error": "images is required"}})
+
+    def test_rejects_json_with_invalid_image_url(self) -> None:
+        response = self.client.post(
+            "/v1/images/edits",
+            headers=self.auth_header,
+            json={
+                "prompt": "把这张图改成复古海报",
+                "model": "gpt-image-1",
+                "n": 1,
+                "response_format": "b64_json",
+                "images": [
+                    {
+                        "image_url": "not-a-data-url",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json(),
+            {"detail": {"error": "images[0].image_url must be a data URL"}},
+        )
+
+    def test_rejects_json_with_invalid_base64_image(self) -> None:
+        response = self.client.post(
+            "/v1/images/edits",
+            headers=self.auth_header,
+            json={
+                "prompt": "把这张图改成复古海报",
+                "model": "gpt-image-1",
+                "n": 1,
+                "response_format": "b64_json",
+                "images": [
+                    {
+                        "image_url": "data:image/png;base64,***",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json(),
+            {"detail": {"error": "images[0].image_url base64 decode failed"}},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
