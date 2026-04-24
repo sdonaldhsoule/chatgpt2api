@@ -10,6 +10,9 @@ web_dist
 .venv
 .idea
 .worktrees/
+.tmp-test/
+.playwright-mcp/
+.pytest_cache/
 data
 config.json
 edit
