@@ -1,13 +1,13 @@
 import base64
-import json
 import hashlib
-import uuid
+import json
+import re
 import time
+import uuid
 from pathlib import Path
-from typing import Any, Dict, Iterator
+from typing import Any, Iterator
 
 from curl_cffi import requests
-import re
 from fastapi import HTTPException
 from utils.log import logger
 from services.usage import build_chat_usage
@@ -25,10 +25,7 @@ def is_image_chat_request(body: dict[str, object]) -> bool:
     modalities = body.get("modalities")
     if model in IMAGE_MODELS:
         return True
-    if isinstance(modalities, list):
-        normalized = {str(item or "").strip().lower() for item in modalities}
-        return "image" in normalized
-    return False
+    return isinstance(modalities, list) and "image" in {str(item or "").strip().lower() for item in modalities}
 
 
 def ensure_ok(response: requests.Response, context: str) -> None:
@@ -42,14 +39,8 @@ def ensure_ok(response: requests.Response, context: str) -> None:
     raise RuntimeError(f"{context} failed: status={response.status_code}, body={body}")
 
 
-def parse_sse_lines(response: requests.Response) -> Iterator[Dict[str, Any]]:
-    for raw_line in response.iter_lines():
-        if not raw_line:
-            continue
-        line = raw_line.decode("utf-8", errors="ignore")
-        if not line.startswith("data:"):
-            continue
-        payload = line[5:].strip()
+def parse_sse_lines(response: requests.Response) -> Iterator[dict[str, Any]]:
+    for payload in iter_sse_payloads(response):
         if payload == "[DONE]":
             yield {"done": True}
             break
@@ -70,8 +61,40 @@ def sse_json_stream(items) -> Iterator[str]:
             "error_type": exc.__class__.__name__,
             "error": str(exc),
         })
-        yield f"data: {json.dumps({'error': {'message': str(exc), 'type': exc.__class__.__name__}}, ensure_ascii=False)}\n\n"
+        error = exc.to_openai_error() if hasattr(exc, "to_openai_error") else {
+            "error": {"message": str(exc), "type": exc.__class__.__name__}
+        }
+        yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
     yield "data: [DONE]\n\n"
+
+
+def anthropic_sse_stream(items) -> Iterator[str]:
+    try:
+        for item in items:
+            event = str(item.get("type") or "message_delta") if isinstance(item, dict) else "message_delta"
+            yield f"event: {event}\n"
+            yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+    except Exception as exc:
+        logger.warning({
+            "event": "anthropic_sse_stream_error",
+            "error_type": exc.__class__.__name__,
+            "error": str(exc),
+        })
+        error = {"type": "error", "error": {"type": exc.__class__.__name__, "message": str(exc)}}
+        yield "event: error\n"
+        yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
+
+
+def iter_sse_payloads(response: requests.Response) -> Iterator[str]:
+    for raw_line in response.iter_lines():
+        if not raw_line:
+            continue
+        line = raw_line.decode("utf-8", errors="ignore") if isinstance(raw_line, bytes) else str(raw_line)
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if payload:
+            yield payload
 
 
 def save_images_from_text(text: str, prefix: str) -> list[Path]:
@@ -159,7 +182,7 @@ def extract_prompt_from_message_content(content: object) -> str:
 def extract_image_from_message_content(content: object) -> list[tuple[bytes, str]]:
     if not isinstance(content, list):
         return []
-    images: list[tuple[bytes, str]] = []
+    images = []
     for item in content:
         if not isinstance(item, dict):
             continue

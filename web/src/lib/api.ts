@@ -4,16 +4,19 @@ export type AccountType = "Free" | "Plus" | "ProLite" | "Pro" | "Team";
 export type AccountStatus = "正常" | "限流" | "异常" | "禁用";
 export type ImageModel = "auto" | "gpt-image-1" | "gpt-image-2" | "codex-gpt-image-2";
 export type AuthRole = "admin" | "user";
+
 export type ApiImageUsage = {
   input_tokens: number;
   output_tokens: number;
   total_tokens: number;
 };
+
 export type ApiHistoryImage = {
   id: string;
   file_name: string;
   mime_type: string;
 };
+
 export type ApiImageHistoryRecord = {
   id: string;
   created_at: string;
@@ -94,7 +97,49 @@ export type SettingsConfig = {
   proxy: string;
   base_url?: string;
   refresh_account_interval_minute?: number | string;
+  image_retention_days?: number | string;
+  auto_remove_invalid_accounts?: boolean;
+  auto_remove_rate_limited_accounts?: boolean;
+  log_levels?: string[];
   [key: string]: unknown;
+};
+
+export type ManagedImage = {
+  name: string;
+  date: string;
+  size: number;
+  url: string;
+  created_at: string;
+};
+
+export type SystemLog = {
+  time: string;
+  type: "call" | "account" | string;
+  summary?: string;
+  detail?: Record<string, unknown>;
+  [key: string]: unknown;
+};
+
+export type ImageResponse = {
+  created: number;
+  data: Array<{ b64_json?: string; url?: string; revised_prompt?: string }>;
+};
+
+export type ImageTask = {
+  id: string;
+  status: "queued" | "running" | "success" | "error";
+  mode: "generate" | "edit";
+  model?: ImageModel;
+  size?: string;
+  created_at: string;
+  updated_at: string;
+  data?: Array<{ b64_json?: string; url?: string; revised_prompt?: string }>;
+  error?: string;
+};
+
+type ImageTaskListResponse = {
+  items: ImageTask[];
+  missing_ids: string[];
 };
 
 export type LoginResponse = {
@@ -112,6 +157,44 @@ export type UserKey = {
   enabled: boolean;
   created_at: string | null;
   last_used_at: string | null;
+};
+
+export type RegisterConfig = {
+  enabled: boolean;
+  mail: {
+    request_timeout: number;
+    wait_timeout: number;
+    wait_interval: number;
+    providers: Array<Record<string, unknown>>;
+  };
+  proxy: string;
+  total: number;
+  threads: number;
+  mode: "total" | "quota" | "available";
+  target_quota: number;
+  target_available: number;
+  check_interval: number;
+  stats: {
+    job_id?: string;
+    success: number;
+    fail: number;
+    done: number;
+    running: number;
+    threads: number;
+    elapsed_seconds?: number;
+    avg_seconds?: number;
+    success_rate?: number;
+    current_quota?: number;
+    current_available?: number;
+    started_at?: string;
+    updated_at?: string;
+    finished_at?: string;
+  };
+  logs?: Array<{
+    time: string;
+    text: string;
+    level: string;
+  }>;
 };
 
 export async function login(authKey: string) {
@@ -184,7 +267,7 @@ export async function deleteImageHistoryImages(items: ApiImageHistoryDeleteItem[
 }
 
 export async function generateImage(prompt: string, model?: ImageModel, size?: string) {
-  return httpRequest<{ created: number; data: Array<{ b64_json: string; revised_prompt?: string }> }>(
+  return httpRequest<ImageResponse>(
     "/v1/images/generations",
     {
       method: "POST",
@@ -215,13 +298,61 @@ export async function editImage(files: File | File[], prompt: string, model?: Im
   }
   formData.append("n", "1");
 
-  return httpRequest<{ created: number; data: Array<{ b64_json: string; revised_prompt?: string }> }>(
+  return httpRequest<ImageResponse>(
     "/v1/images/edits",
     {
       method: "POST",
       body: formData,
     },
   );
+}
+
+export async function createImageGenerationTask(clientTaskId: string, prompt: string, model?: ImageModel, size?: string) {
+  return httpRequest<ImageTask>("/api/image-tasks/generations", {
+    method: "POST",
+    body: {
+      client_task_id: clientTaskId,
+      prompt,
+      ...(model ? { model } : {}),
+      ...(size ? { size } : {}),
+    },
+  });
+}
+
+export async function createImageEditTask(
+  clientTaskId: string,
+  files: File | File[],
+  prompt: string,
+  model?: ImageModel,
+  size?: string,
+) {
+  const formData = new FormData();
+  const uploadFiles = Array.isArray(files) ? files : [files];
+
+  uploadFiles.forEach((file) => {
+    formData.append("image", file);
+  });
+  formData.append("client_task_id", clientTaskId);
+  formData.append("prompt", prompt);
+  if (model) {
+    formData.append("model", model);
+  }
+  if (size) {
+    formData.append("size", size);
+  }
+
+  return httpRequest<ImageTask>("/api/image-tasks/edits", {
+    method: "POST",
+    body: formData,
+  });
+}
+
+export async function fetchImageTasks(ids: string[]) {
+  const params = new URLSearchParams();
+  if (ids.length > 0) {
+    params.set("ids", ids.join(","));
+  }
+  return httpRequest<ImageTaskListResponse>(`/api/image-tasks${params.toString() ? `?${params.toString()}` : ""}`);
 }
 
 export async function fetchSettingsConfig() {
@@ -233,6 +364,23 @@ export async function updateSettingsConfig(settings: SettingsConfig) {
     method: "POST",
     body: settings,
   });
+}
+
+export async function fetchManagedImages(filters: { start_date?: string; end_date?: string }) {
+  const params = new URLSearchParams();
+  if (filters.start_date) params.set("start_date", filters.start_date);
+  if (filters.end_date) params.set("end_date", filters.end_date);
+  return httpRequest<{ items: ManagedImage[]; groups: Array<{ date: string; items: ManagedImage[] }> }>(
+    `/api/images${params.toString() ? `?${params.toString()}` : ""}`,
+  );
+}
+
+export async function fetchSystemLogs(filters: { type?: string; start_date?: string; end_date?: string }) {
+  const params = new URLSearchParams();
+  if (filters.type) params.set("type", filters.type);
+  if (filters.start_date) params.set("start_date", filters.start_date);
+  if (filters.end_date) params.set("end_date", filters.end_date);
+  return httpRequest<{ items: SystemLog[] }>(`/api/logs${params.toString() ? `?${params.toString()}` : ""}`);
 }
 
 export async function fetchUserKeys() {
@@ -257,6 +405,29 @@ export async function deleteUserKey(keyId: string) {
   return httpRequest<{ items: UserKey[] }>(`/api/auth/users/${keyId}`, {
     method: "DELETE",
   });
+}
+
+export async function fetchRegisterConfig() {
+  return httpRequest<{ register: RegisterConfig }>("/api/register");
+}
+
+export async function updateRegisterConfig(updates: Partial<RegisterConfig>) {
+  return httpRequest<{ register: RegisterConfig }>("/api/register", {
+    method: "POST",
+    body: updates,
+  });
+}
+
+export async function startRegister() {
+  return httpRequest<{ register: RegisterConfig }>("/api/register/start", { method: "POST" });
+}
+
+export async function stopRegister() {
+  return httpRequest<{ register: RegisterConfig }>("/api/register/stop", { method: "POST" });
+}
+
+export async function resetRegister() {
+  return httpRequest<{ register: RegisterConfig }>("/api/register/reset", { method: "POST" });
 }
 
 // ── CPA (CLIProxyAPI) ──────────────────────────────────────────────

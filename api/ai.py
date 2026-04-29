@@ -7,15 +7,21 @@ from json import JSONDecodeError
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.datastructures import FormData, UploadFile
 
-from api.support import raise_image_quota_error, require_identity, resolve_image_base_url
-from services.account_service import account_service
-from services.chatgpt_service import ChatGPTService, ImageGenerationError
+from api.support import require_identity, resolve_image_base_url
 from services.image_history_service import image_history_service
-from utils.helper import is_image_chat_request, parse_image_count, sse_json_stream
+from services.log_service import LoggedCall
+from services.protocol import (
+    anthropic_v1_messages,
+    openai_v1_chat_complete,
+    openai_v1_image_edit,
+    openai_v1_image_generations,
+    openai_v1_models,
+    openai_v1_response,
+)
+from utils.helper import parse_image_count
 
 
 class ImageGenerationRequest(BaseModel):
@@ -44,6 +50,14 @@ class ResponseCreateRequest(BaseModel):
     input: object | None = None
     tools: list[dict[str, object]] | None = None
     tool_choice: object | None = None
+    stream: bool | None = None
+
+
+class AnthropicMessageRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    model: str | None = None
+    messages: list[dict[str, object]] | None = None
+    system: object | None = None
     stream: bool | None = None
 
 
@@ -176,14 +190,14 @@ async def _parse_image_edit_request(
     return prompt, model, n, size, response_format, stream, images
 
 
-def create_router(chatgpt_service: ChatGPTService) -> APIRouter:
+def create_router() -> APIRouter:
     router = APIRouter()
 
     @router.get("/v1/models")
     async def list_models(authorization: str | None = Header(default=None)):
         require_identity(authorization)
         try:
-            return await run_in_threadpool(chatgpt_service.list_models)
+            return await run_in_threadpool(openai_v1_models.list_models)
         except Exception as exc:
             raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
 
@@ -193,93 +207,60 @@ def create_router(chatgpt_service: ChatGPTService) -> APIRouter:
             request: Request,
             authorization: str | None = Header(default=None),
     ):
-        require_identity(authorization)
-        base_url = resolve_image_base_url(request)
-        if body.stream:
-            try:
-                await run_in_threadpool(account_service.get_available_access_token)
-            except RuntimeError as exc:
-                raise_image_quota_error(exc)
-            return StreamingResponse(
-                sse_json_stream(
-                    chatgpt_service.stream_image_generation(
-                        body.prompt, body.model, body.n, body.size, body.response_format, base_url
-                    )
-                ),
-                media_type="text/event-stream",
-            )
-        try:
-            return await run_in_threadpool(
-                lambda: chatgpt_service.generate_api_images(
-                    body.prompt,
-                    body.model,
-                    body.n,
-                    "/v1/images/generations",
-                    body.response_format,
-                    base_url,
-                    size=body.size,
-                )
-            )
-        except ImageGenerationError as exc:
-            raise_image_quota_error(exc)
+        identity = require_identity(authorization)
+        payload = body.model_dump(mode="python")
+        payload["base_url"] = resolve_image_base_url(request)
+        call = LoggedCall(identity, "/v1/images/generations", body.model, "文生图")
+        return await call.run(openai_v1_image_generations.handle, payload)
 
     @router.post("/v1/images/edits")
     async def edit_images(
             request: Request,
             authorization: str | None = Header(default=None),
     ):
-        require_identity(authorization)
+        identity = require_identity(authorization)
         prompt, model, n, size, response_format, stream, images = await _parse_image_edit_request(request)
-        base_url = resolve_image_base_url(request)
-        if stream:
-            if not account_service.has_available_account():
-                raise_image_quota_error(RuntimeError("no available image quota"))
-            return StreamingResponse(
-                sse_json_stream(chatgpt_service.stream_image_edit(prompt, images, model, n, size, response_format, base_url)),
-                media_type="text/event-stream",
-            )
-        try:
-            return await run_in_threadpool(
-                lambda: chatgpt_service.edit_api_images(
-                    prompt,
-                    images,
-                    model,
-                    n,
-                    "/v1/images/edits",
-                    response_format,
-                    base_url,
-                    size=size,
-                )
-            )
-        except ImageGenerationError as exc:
-            raise_image_quota_error(exc)
+        payload = {
+            "prompt": prompt,
+            "images": images,
+            "model": model,
+            "n": n,
+            "size": size,
+            "response_format": response_format,
+            "stream": stream,
+            "base_url": resolve_image_base_url(request),
+        }
+        call = LoggedCall(identity, "/v1/images/edits", model, "图生图")
+        return await call.run(openai_v1_image_edit.handle, payload)
 
     @router.post("/v1/chat/completions")
     async def create_chat_completion(body: ChatCompletionRequest, authorization: str | None = Header(default=None)):
-        require_identity(authorization)
+        identity = require_identity(authorization)
         payload = body.model_dump(mode="python")
-        if bool(payload.get("stream")):
-            if is_image_chat_request(payload):
-                try:
-                    await run_in_threadpool(account_service.get_available_access_token)
-                except RuntimeError as exc:
-                    raise_image_quota_error(exc)
-            return StreamingResponse(
-                sse_json_stream(chatgpt_service.stream_chat_completion(payload)),
-                media_type="text/event-stream",
-            )
-        return await run_in_threadpool(chatgpt_service.create_chat_completion, payload)
+        model = str(payload.get("model") or "auto")
+        call = LoggedCall(identity, "/v1/chat/completions", model, "文本生成")
+        return await call.run(openai_v1_chat_complete.handle, payload)
 
     @router.post("/v1/responses")
     async def create_response(body: ResponseCreateRequest, authorization: str | None = Header(default=None)):
-        require_identity(authorization)
+        identity = require_identity(authorization)
         payload = body.model_dump(mode="python")
-        if bool(payload.get("stream")):
-            return StreamingResponse(
-                sse_json_stream(chatgpt_service.stream_response(payload)),
-                media_type="text/event-stream",
-            )
-        return await run_in_threadpool(chatgpt_service.create_response, payload)
+        model = str(payload.get("model") or "auto")
+        call = LoggedCall(identity, "/v1/responses", model, "Responses")
+        return await call.run(openai_v1_response.handle, payload)
+
+    @router.post("/v1/messages")
+    async def create_message(
+            body: AnthropicMessageRequest,
+            authorization: str | None = Header(default=None),
+            x_api_key: str | None = Header(default=None, alias="x-api-key"),
+            anthropic_version: str | None = Header(default=None, alias="anthropic-version"),
+    ):
+        identity = require_identity(authorization or (f"Bearer {x_api_key}" if x_api_key else None))
+        payload = body.model_dump(mode="python")
+        model = str(payload.get("model") or "auto")
+        call = LoggedCall(identity, "/v1/messages", model, "Messages")
+        return await call.run(anthropic_v1_messages.handle, payload, sse="anthropic")
 
     @router.get("/api/image-history")
     async def get_image_history(authorization: str | None = Header(default=None)):

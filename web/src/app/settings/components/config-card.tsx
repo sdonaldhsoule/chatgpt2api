@@ -6,6 +6,7 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { testProxy, type ProxyTestResult } from "@/lib/api";
 
@@ -14,10 +15,15 @@ import { useSettingsStore } from "../store";
 export function ConfigCard() {
   const [isTestingProxy, setIsTestingProxy] = useState(false);
   const [proxyTestResult, setProxyTestResult] = useState<ProxyTestResult | null>(null);
+  const logLevelOptions = ["debug", "info", "warning", "error"];
   const config = useSettingsStore((state) => state.config);
   const isLoadingConfig = useSettingsStore((state) => state.isLoadingConfig);
   const isSavingConfig = useSettingsStore((state) => state.isSavingConfig);
   const setRefreshAccountIntervalMinute = useSettingsStore((state) => state.setRefreshAccountIntervalMinute);
+  const setImageRetentionDays = useSettingsStore((state) => state.setImageRetentionDays);
+  const setAutoRemoveInvalidAccounts = useSettingsStore((state) => state.setAutoRemoveInvalidAccounts);
+  const setAutoRemoveRateLimitedAccounts = useSettingsStore((state) => state.setAutoRemoveRateLimitedAccounts);
+  const setLogLevel = useSettingsStore((state) => state.setLogLevel);
   const setProxy = useSettingsStore((state) => state.setProxy);
   const setBaseUrl = useSettingsStore((state) => state.setBaseUrl);
   const saveConfig = useSettingsStore((state) => state.saveConfig);
@@ -119,6 +125,47 @@ export function ConfigCard() {
               className="h-10 rounded-xl border-stone-200 bg-white"
             />
             <p className="text-xs text-stone-500">用于生成图片结果的访问前缀地址。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">图片自动清理</label>
+            <Input
+              value={String(config?.image_retention_days || "")}
+              onChange={(event) => setImageRetentionDays(event.target.value)}
+              placeholder="30"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">自动删除多少天前的本地图片。</p>
+          </div>
+          <label className="flex items-center gap-3 rounded-xl border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700">
+            <Checkbox
+              checked={Boolean(config?.auto_remove_invalid_accounts)}
+              onCheckedChange={(checked) => setAutoRemoveInvalidAccounts(Boolean(checked))}
+            />
+            自动移除异常账号
+          </label>
+          <label className="flex items-center gap-3 rounded-xl border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700">
+            <Checkbox
+              checked={Boolean(config?.auto_remove_rate_limited_accounts)}
+              onCheckedChange={(checked) => setAutoRemoveRateLimitedAccounts(Boolean(checked))}
+            />
+            自动移除限流账号
+          </label>
+          <div className="space-y-3 rounded-xl border border-stone-200 bg-white px-4 py-3">
+            <div>
+              <label className="text-sm text-stone-700">控制台日志级别</label>
+              <p className="mt-1 text-xs text-stone-500">不选择时使用默认 info / warning / error。</p>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              {logLevelOptions.map((level) => (
+                <label key={level} className="flex items-center gap-2 text-sm capitalize text-stone-700">
+                  <Checkbox
+                    checked={Boolean(config?.log_levels?.includes(level))}
+                    onCheckedChange={(checked) => setLogLevel(level, Boolean(checked))}
+                  />
+                  {level}
+                </label>
+              ))}
+            </div>
           </div>
         </div>
 

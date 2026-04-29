@@ -5,6 +5,7 @@ from unittest import mock
 
 from fastapi.testclient import TestClient
 
+from api import ai as ai_module
 from api import app as app_module
 from api import support as support_module
 
@@ -14,43 +15,21 @@ class _FakeThread:
         return None
 
 
-class _FakeChatGPTService:
+class _FakeImageEditHandler:
     last_call: dict[str, object] | None = None
 
-    def __init__(self, _account_service) -> None:
-        return None
-
-    def edit_api_images(
-        self,
-        prompt: str,
-        images,
-        model: str,
-        n: int,
-        source_endpoint: str,
-        response_format: str = "b64_json",
-        base_url: str | None = None,
-        size: str | None = None,
-    ):
-        normalized_images = list(images)
-        type(self).last_call = {
-            "prompt": prompt,
-            "images": normalized_images,
-            "model": model,
-            "n": n,
-            "source_endpoint": source_endpoint,
-            "response_format": response_format,
-            "base_url": base_url,
-            "size": size,
-        }
+    @staticmethod
+    def handle(payload: dict[str, object]):
+        _FakeImageEditHandler.last_call = dict(payload)
         return {
             "created": 123,
-            "data": [{"b64_json": "ZmFrZQ==", "revised_prompt": prompt}],
+            "data": [{"b64_json": "ZmFrZQ==", "revised_prompt": str(payload.get("prompt") or "")}],
         }
 
 
 class ImageEditsApiTests(unittest.TestCase):
     def setUp(self) -> None:
-        _FakeChatGPTService.last_call = None
+        _FakeImageEditHandler.last_call = None
         self.auth_header = {"Authorization": "Bearer test-auth"}
         self.fake_config = SimpleNamespace(
             auth_key="test-auth",
@@ -60,7 +39,7 @@ class ImageEditsApiTests(unittest.TestCase):
             base_url="",
         )
         self.patches = [
-            mock.patch.object(app_module, "ChatGPTService", _FakeChatGPTService),
+            mock.patch.object(ai_module.openai_v1_image_edit, "handle", _FakeImageEditHandler.handle),
             mock.patch.object(app_module, "config", self.fake_config),
             mock.patch.object(support_module, "config", self.fake_config),
             mock.patch.object(app_module, "start_limited_account_watcher", lambda _stop_event: _FakeThread()),
@@ -87,10 +66,10 @@ class ImageEditsApiTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertIsNotNone(_FakeChatGPTService.last_call)
-        self.assertEqual(len(_FakeChatGPTService.last_call["images"]), 2)
+        self.assertIsNotNone(_FakeImageEditHandler.last_call)
+        self.assertEqual(len(_FakeImageEditHandler.last_call["images"]), 2)
         self.assertEqual(
-            [item[1] for item in _FakeChatGPTService.last_call["images"]],
+            [item[1] for item in _FakeImageEditHandler.last_call["images"]],
             ["first.png", "second.png"],
         )
 
@@ -106,10 +85,10 @@ class ImageEditsApiTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertIsNotNone(_FakeChatGPTService.last_call)
-        self.assertEqual(len(_FakeChatGPTService.last_call["images"]), 2)
+        self.assertIsNotNone(_FakeImageEditHandler.last_call)
+        self.assertEqual(len(_FakeImageEditHandler.last_call["images"]), 2)
         self.assertEqual(
-            [item[1] for item in _FakeChatGPTService.last_call["images"]],
+            [item[1] for item in _FakeImageEditHandler.last_call["images"]],
             ["first.png", "second.png"],
         )
 
@@ -131,10 +110,10 @@ class ImageEditsApiTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertIsNotNone(_FakeChatGPTService.last_call)
-        self.assertEqual(_FakeChatGPTService.last_call["prompt"], "把这张图改成复古海报")
+        self.assertIsNotNone(_FakeImageEditHandler.last_call)
+        self.assertEqual(_FakeImageEditHandler.last_call["prompt"], "把这张图改成复古海报")
         self.assertEqual(
-            _FakeChatGPTService.last_call["images"],
+            _FakeImageEditHandler.last_call["images"],
             [(b"fake", "image-1.png", "image/png")],
         )
 
