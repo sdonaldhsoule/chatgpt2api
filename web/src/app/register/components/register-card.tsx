@@ -49,8 +49,9 @@ export function RegisterCard() {
       enable: true,
       ...(type === "cloudflare_temp_email" ? { api_base: "", admin_password: "", domain: [] } : {}),
       ...(type === "tempmail_lol" ? { api_key: "", domain: [] } : {}),
+      ...(type === "tempmail_plus" ? { api_base: "https://tempmail.plus/api", domain: [] } : {}),
       ...(type === "moemail" ? { api_base: "", api_key: "", domain: [] } : {}),
-      ...(type === "duckmail" ? { api_key: "", default_domain: "duckmail.sbs" } : {}),
+      ...(type === "duckmail" ? { api_key: "", default_domain: "duckmail.sbs", domain: [] } : {}),
       ...(type === "gptmail" ? { api_key: "", default_domain: "" } : {}),
       ...(type === "yyds_mail" ? { api_base: "https://maliapi.215.im/v1", api_key: "", domain: [], subdomain: "", wildcard: false } : {}),
     });
@@ -167,6 +168,7 @@ export function RegisterCard() {
                           <SelectContent>
                             <SelectItem value="cloudflare_temp_email">cloudflare_temp_email</SelectItem>
                             <SelectItem value="tempmail_lol">tempmail_lol</SelectItem>
+                            <SelectItem value="tempmail_plus">tempmail_plus</SelectItem>
                             <SelectItem value="moemail">moemail</SelectItem>
                             <SelectItem value="duckmail">duckmail</SelectItem>
                             <SelectItem value="gptmail">gptmail(未测试)</SelectItem>
@@ -174,7 +176,7 @@ export function RegisterCard() {
                           </SelectContent>
                         </Select>
                       </div>
-                      {type === "cloudflare_temp_email" || type === "moemail" || type === "yyds_mail" ? (
+                      {type === "cloudflare_temp_email" || type === "tempmail_plus" || type === "moemail" || type === "yyds_mail" ? (
                         <>
                           <div className="space-y-2">
                             <label className="text-sm text-stone-700">API Base</label>
@@ -214,10 +216,10 @@ export function RegisterCard() {
                       ) : null}
                     </div>
 
-                    {type === "tempmail_lol" || type === "cloudflare_temp_email" || type === "moemail" || type === "yyds_mail" ? (
+                    {type === "tempmail_lol" || type === "tempmail_plus" || type === "cloudflare_temp_email" || type === "moemail" || type === "duckmail" || type === "yyds_mail" ? (
                       <div className="space-y-2">
                         <label className="text-sm text-stone-700">Domain</label>
-                        <Textarea value={domains} onChange={(event) => updateProvider(index, { domain: event.target.value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean) })} placeholder={type === "moemail" ? "每行一个域名" : "每行一个域名，留空则使用服务默认域名"} className="min-h-20 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
+                        <Textarea value={domains} onChange={(event) => updateProvider(index, { domain: event.target.value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean) })} placeholder={type === "duckmail" ? "每行一个域名，随机选择；留空则读取 DuckMail /domains" : type === "tempmail_plus" ? "每行一个域名，留空则使用 TempMail.Plus 默认域名池" : type === "moemail" ? "每行一个域名" : "每行一个域名，留空则使用服务默认域名"} className="min-h-20 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
                       </div>
                     ) : null}
                   </div>

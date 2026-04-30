@@ -16,6 +16,17 @@ from curl_cffi import requests as curl_requests
 
 
 ResultT = TypeVar("ResultT")
+TEMPMAIL_PLUS_DOMAINS = [
+    "mailto.plus",
+    "fexpost.com",
+    "fexbox.org",
+    "mailbox.in.ua",
+    "rover.info",
+    "chitthi.in",
+    "fextemp.com",
+    "any.pink",
+    "merepost.com",
+]
 domain_lock = Lock()
 provider_lock = Lock()
 domain_index = 0
@@ -50,6 +61,29 @@ def _next_domain(domains: list[str]) -> str:
         value = domains[domain_index % len(domains)]
         domain_index = (domain_index + 1) % len(domains)
         return value
+
+
+def _domain_values(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        values: list[str] = []
+        for key in ("domain", "name", "value", "address"):
+            values.extend(_domain_values(value.get(key)))
+        return values
+    if isinstance(value, list):
+        values: list[str] = []
+        for item in value:
+            values.extend(_domain_values(item))
+        return values
+    if not isinstance(value, str):
+        return []
+    domains: list[str] = []
+    seen: set[str] = set()
+    for item in re.split(r"[\s,;]+", value):
+        domain = item.strip().lower().lstrip("@")
+        if domain and domain not in seen:
+            seen.add(domain)
+            domains.append(domain)
+    return domains
 
 
 def _parse_received_at(value: Any) -> datetime | None:
@@ -300,13 +334,88 @@ class TempMailLolProvider(BaseMailProvider):
         self.session.close()
 
 
+class TempMailPlusProvider(BaseMailProvider):
+    name = "tempmail_plus"
+
+    def __init__(self, entry: dict, conf: dict):
+        super().__init__(conf, str(entry.get("provider_ref") or ""))
+        self.api_base = str(entry.get("api_base") or "https://tempmail.plus/api").rstrip("/")
+        self.domain = _domain_values(entry.get("domain")) or TEMPMAIL_PLUS_DOMAINS
+        self.session = requests.Session()
+        self.session.trust_env = False
+        self.session.headers.update({
+            "User-Agent": conf["user_agent"],
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "X-Requested-With": "XMLHttpRequest",
+        })
+
+    def _request(self, method: str, path: str, params: dict | None = None, expected: tuple[int, ...] = (200,)):
+        resp = self.session.request(method.upper(), f"{self.api_base}{path}", params=params, timeout=self.conf["request_timeout"], verify=False)
+        if resp.status_code not in expected:
+            raise RuntimeError(f"TempMail.Plus 请求失败: {method} {path}, HTTP {resp.status_code}, body={resp.text[:300]}")
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise RuntimeError(f"TempMail.Plus {method} {path} 返回结构不是对象")
+        if data.get("result") is False:
+            raise RuntimeError(f"TempMail.Plus 请求失败: {data.get('error') or data.get('message') or path}")
+        return data
+
+    def create_mailbox(self, username: str | None = None) -> dict[str, Any]:
+        domain = random.choice(self.domain)
+        address = f"{username or _random_mailbox_name()}@{domain}"
+        return {"provider": self.name, "provider_ref": self.provider_ref, "address": address}
+
+    @staticmethod
+    def _message_key(item: dict[str, Any]) -> tuple[float, int, str]:
+        received_at = _parse_received_at(item.get("date") or item.get("time") or item.get("created_at") or item.get("createdAt") or item.get("timestamp"))
+        message_id = str(item.get("mail_id") or item.get("id") or item.get("message_id") or "").strip()
+        try:
+            numeric_id = int(message_id)
+        except Exception:
+            numeric_id = 0
+        timestamp = (received_at or datetime.fromtimestamp(0, tz=timezone.utc)).timestamp()
+        return timestamp, numeric_id, message_id
+
+    def fetch_latest_message(self, mailbox: dict[str, Any]) -> dict[str, Any] | None:
+        address = str(mailbox.get("address") or "").strip()
+        if not address:
+            raise RuntimeError("TempMail.Plus 缺少 address")
+        data = self._request("GET", "/mails", params={"email": address})
+        raw_items = data.get("mail_list") or data.get("mails") or data.get("messages") or []
+        messages = [item for item in raw_items if isinstance(item, dict)] if isinstance(raw_items, list) else []
+        if not messages:
+            return None
+        item = max(messages, key=self._message_key)
+        message_id = str(item.get("mail_id") or item.get("id") or item.get("message_id") or "").strip()
+        detail = self._request("GET", f"/mails/{message_id}", params={"email": address}) if message_id else item
+        text_content, html_content = _extract_content(detail)
+        sender = detail.get("from") or detail.get("from_mail") or item.get("from_mail") or ""
+        if isinstance(sender, dict):
+            sender = sender.get("address") or sender.get("email") or sender.get("name") or ""
+        return {
+            "provider": self.name,
+            "mailbox": address,
+            "message_id": message_id,
+            "subject": str(detail.get("subject") or item.get("subject") or ""),
+            "sender": str(sender),
+            "text_content": text_content,
+            "html_content": html_content,
+            "received_at": _parse_received_at(detail.get("date") or item.get("time") or item.get("date") or item.get("created_at") or item.get("createdAt") or item.get("timestamp")),
+            "raw": detail,
+        }
+
+    def close(self) -> None:
+        self.session.close()
+
+
 class DuckMailProvider(BaseMailProvider):
     name = "duckmail"
 
     def __init__(self, entry: dict, conf: dict):
         super().__init__(conf, str(entry.get("provider_ref") or ""))
         self.api_key = str(entry["api_key"]).strip()
-        self.default_domain = str(entry.get("default_domain") or "duckmail.sbs").strip() or "duckmail.sbs"
+        self.domain = _domain_values(entry.get("domain"))
+        self.default_domains = _domain_values(entry.get("default_domain")) or ["duckmail.sbs"]
         self.session = requests.Session()
         self.session.trust_env = False
         self.session.headers.update({"User-Agent": conf["user_agent"], "Accept": "application/json", "Content-Type": "application/json"})
@@ -322,9 +431,29 @@ class DuckMailProvider(BaseMailProvider):
     def _items(data):
         return data if isinstance(data, list) else data.get("hydra:member") or data.get("member") or data.get("data") or []
 
+    @classmethod
+    def _domains(cls, data: Any) -> list[str]:
+        domains: list[str] = []
+        seen: set[str] = set()
+        for item in cls._items(data):
+            for domain in _domain_values(item):
+                if domain not in seen:
+                    seen.add(domain)
+                    domains.append(domain)
+        return domains
+
+    def _select_domain(self) -> str:
+        domains = self.domain
+        if not domains:
+            domains = self._domains(self._request("GET", "/domains", use_api_key=True))
+        if not domains:
+            domains = self.default_domains
+        if not domains:
+            raise RuntimeError("DuckMail domain 不能为空")
+        return random.choice(domains)
+
     def create_mailbox(self, username: str | None = None) -> dict[str, Any]:
-        domains = self._items(self._request("GET", "/domains", use_api_key=True))
-        domain = random.choice(domains).get("domain") if domains else self.default_domain
+        domain = self._select_domain()
         password = "".join(random.choices(string.ascii_letters + string.digits, k=12))
         address = f"{username or _random_mailbox_name()}@{domain}"
         payload = {"address": address, "password": password}
@@ -538,6 +667,8 @@ def _create_provider(mail_config: dict, provider: str = "", provider_ref: str = 
         return CloudflareTempMailProvider(entry, conf)
     if entry["type"] == "tempmail_lol":
         return TempMailLolProvider(entry, conf)
+    if entry["type"] == "tempmail_plus":
+        return TempMailPlusProvider(entry, conf)
     if entry["type"] == "duckmail":
         return DuckMailProvider(entry, conf)
     if entry["type"] == "gptmail":
